@@ -135,9 +135,9 @@ static void BuildUnbalancedCounts(size_t totalCount, int nranks, AlltoAllvPlan* 
 static AlltoAllvPlan* GetPlan(size_t totalCount, int nranks) {
   if (plan.count != totalCount || plan.nranks != nranks) {
     // Use Unbalanced counts for correctness testing
-    BuildUnbalancedCounts(totalCount, nranks, &plan);
+    //BuildUnbalancedCounts(totalCount, nranks, &plan);
     // Use Balanced counts for bandwidth testing
-    //BuildBalancedCounts(totalCount, nranks, &plan);
+    BuildBalancedCounts(totalCount, nranks, &plan);
   }
   return &plan;
 }
