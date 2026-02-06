@@ -22,6 +22,9 @@ struct AlltoAllvPlan {
 };
 
 static thread_local AlltoAllvPlan plan;
+static thread_local void** relaybuffsForThread = nullptr;
+static thread_local int relaybuffsFirstRank = -1;
+static thread_local int relaybuffsCount = 0;
 
 // Generate balanced counts and displacements for alltoallv
 static void BuildBalancedCounts(size_t totalCount, int nranks, AlltoAllvPlan* out) {
@@ -131,7 +134,10 @@ static void BuildUnbalancedCounts(size_t totalCount, int nranks, AlltoAllvPlan* 
 
 static AlltoAllvPlan* GetPlan(size_t totalCount, int nranks) {
   if (plan.count != totalCount || plan.nranks != nranks) {
+    // Use Unbalanced counts for correctness testing
     BuildUnbalancedCounts(totalCount, nranks, &plan);
+    // Use Balanced counts for bandwidth testing
+    //BuildBalancedCounts(totalCount, nranks, &plan);
   }
   return &plan;
 }
@@ -213,22 +219,27 @@ testResult_t AlltoAllvRunColl(void* sendbuff, size_t sendoffset, void* recvbuff,
   char* sptr = (char*)sendbuff + sendoffset;
   char* rptr = (char*)recvbuff + recvoffset;
 
-#if NCCL_VERSION_CODE >= NCCL_VERSION(2,27,0)
-  ncclCommProperties commProperties = NCCL_COMM_PROPERTIES_INITIALIZER;
-  if (ncclCommQueryProperties) {
-    ncclResult_t pres = ncclCommQueryProperties(comm, &commProperties);
-    if (pres == ncclSuccess && commProperties.nRanks > 8) {
+  void* relaybuff = nullptr;
+  size_t relayCount = 0;
+  if (use_relay_buffer) {
+    int rank = 0;
+    NCCLCHECK(ncclCommUserRank(comm, &rank));
+    int localIndex = rank - relaybuffsFirstRank;
+    if (relaybuffsForThread && localIndex >= 0 && localIndex < relaybuffsCount) {
+      relaybuff = relaybuffsForThread[localIndex];
+    }
+    if (relaybuff == nullptr) {
       if (is_main_thread) {
-        fprintf(stderr, "AlltoAllv: multi-node requires a relay buffer in a symmetric window; this test currently supports single-node only.\n");
+        fprintf(stderr, "AlltoAllv: relay buffer requested but not allocated.\n");
       }
       return testInvalidUsage;
     }
+    relayCount = count * relayBufferSizeFactor;
   }
-#endif
 
   ncclResult_t res = ncclAlltoAllv(sptr, planPtr->sendcounts.data(), planPtr->sdispls.data(),
                                   rptr, planPtr->recvcounts.data(), planPtr->rdispls.data(),
-                                  nullptr, 0, type, comm, stream);
+                                  relaybuff, relayCount, type, comm, stream);
   if (res != ncclSuccess) {
     if (res == ncclInvalidArgument && is_main_thread) {
       fprintf(stderr,
@@ -256,6 +267,11 @@ void AlltoAllvGetBuffSize(size_t *sendcount, size_t *recvcount, size_t count, in
 testResult_t AlltoAllvRunTest(struct threadArgs* args, int root, ncclDataType_t type, const char* typeName, ncclRedOp_t op, const char* opName) {
   (void)op;
   (void)opName;
+  const int firstRank = args->proc * args->nThreads * args->nGpus + args->thread * args->nGpus;
+  relaybuffsForThread = args->relaybuffs;
+  relaybuffsFirstRank = firstRank;
+  relaybuffsCount = args->nGpus;
+
   args->collTest = &alltoAllvTest;
   ncclDataType_t *run_types;
   const char **run_typenames;

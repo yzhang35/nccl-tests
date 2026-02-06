@@ -102,8 +102,11 @@ static int report_cputime = 0;
 static int report_timestamps = 0;
 static int deviceImpl = 0;
 int memory_report = 0;
+int use_relay_buffer = 0;
 
 int deviceCtaCount = 16; // Default number of CTAs for device implementation
+
+int relayBufferSizeFactor = 4; // Default relay buffer size factor
 
 // Report average iteration time: (0=RANK0,1=AVG,2=MIN,3=MAX)
 static int average = 1;
@@ -797,17 +800,24 @@ testResult_t threadInit(struct threadArgs* args) {
   }
 
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+  const size_t relayBytes = args->maxbytes * relayBufferSizeFactor;
   NCCLCHECK(ncclGroupStart());
   for (int i=0; i<args->nGpus; i++) {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,27,0)
     if (test_ncclVersion >= NCCL_VERSION(2,27,0) && (local_register == SYMMETRIC_REGISTER)) {
       NCCLCHECK(ncclCommWindowRegister(args->comms[i], args->sendbuffs[i], args->maxbytes, (ncclWindow_t*)&args->sendRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
       NCCLCHECK(ncclCommWindowRegister(args->comms[i], args->recvbuffs[i], args->maxbytes, (ncclWindow_t*)&args->recvRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
+      if (use_relay_buffer && args->relaybuffs && args->relaybuffs[i]) {
+        NCCLCHECK(ncclCommWindowRegister(args->comms[i], args->relaybuffs[i], relayBytes, (ncclWindow_t*)&args->relayRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
+      }
     } else
 #endif
     {
       if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->sendbuffs[i], args->maxbytes, &args->sendRegHandles[i]));
       if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->recvbuffs[i], args->maxbytes, &args->recvRegHandles[i]));
+      if (local_register && use_relay_buffer && args->relaybuffs && args->relaybuffs[i]) {
+        NCCLCHECK(ncclCommRegister(args->comms[i], args->relaybuffs[i], relayBytes, &args->relayRegHandles[i]));
+      }
     }
   }
   NCCLCHECK(ncclGroupEnd());
@@ -885,15 +895,29 @@ testResult_t threadLaunch(struct testThread* thread) {
   return testSuccess;
 }
 
-testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, size_t recvBytes, void **expected, size_t nbytes) {
+testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, size_t recvBytes,
+                           void **expected, size_t nbytes, void **relaybuff) {
+  (void)sendBytes;
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
     NCCLCHECK(ncclMemAlloc(sendbuff, nbytes));
     NCCLCHECK(ncclMemAlloc(recvbuff, nbytes));
     if (datacheck) NCCLCHECK(ncclMemAlloc(expected, recvBytes));
+    if (use_relay_buffer && relaybuff) {
+      size_t relayBytes = nbytes * relayBufferSizeFactor;
+      NCCLCHECK(ncclMemAlloc(relaybuff, relayBytes));
+    } else if (relaybuff) {
+      *relaybuff = nullptr;
+    }
 #else
     CUDACHECK(cudaMalloc(sendbuff, nbytes));
     CUDACHECK(cudaMalloc(recvbuff, nbytes));
     if (datacheck) CUDACHECK(cudaMalloc(expected, recvBytes));
+    if (use_relay_buffer && relaybuff) {
+      size_t relayBytes = nbytes * relayBufferSizeFactor;
+      CUDACHECK(cudaMalloc(relaybuff, relayBytes));
+    } else if (relaybuff) {
+      *relaybuff = nullptr;
+    }
 #endif
     return testSuccess;
 }
@@ -965,6 +989,7 @@ int main(int argc, char* argv[], char **envp) {
     {"device_implementation", required_argument, 0, 'D'},
     {"device_cta_count", required_argument, 0, 'V'},
     {"memory", required_argument, 0, 'M'},
+    {"relay_buffer", required_argument, 0, 'B'},
 
     {"help", no_argument, 0, 'h'},
     {}
@@ -972,7 +997,7 @@ int main(int argc, char* argv[], char **envp) {
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:J:S:M:", longopts, &longindex);
+    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:J:S:M:B:", longopts, &longindex);
 
     if (c == -1)
       break;
@@ -1084,6 +1109,9 @@ int main(int argc, char* argv[], char **envp) {
       case 'M':
         memory_report = (int)strtol(optarg, NULL, 0);
         break;
+      case 'B':
+        use_relay_buffer = (int)strtol(optarg, NULL, 0);
+        break;
       case 'x':
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,27,0)
         ctaPolicy = (int)strtol(optarg, NULL, 0);
@@ -1154,6 +1182,7 @@ int main(int argc, char* argv[], char **envp) {
             "[-D,--device_implementation <implementation number> enable device implementation (default: 0, use NCCL implementation; requires -R 2 if > 0)] \n\t"
             "[-V,--device_cta_count <number> set number of CTAs for device implementation (default: 16)] \n\t"
             "[-M,--memory_report <0/1> enable memory usage report (default: 0)] \n\t"
+            "[-B,--relay_buffer <0/1> enable relay buffer for alltoallv (default: 0)] \n\t"
             "[-h,--help]\n",
           basename(argv[0]));
         return 0;
@@ -1273,7 +1302,11 @@ testResult_t run() {
   const size_t GB = (1ULL << 30);
   size_t reserveMem =  std::min(DIVUP(maxMem, 16*GB) * 1*GB, 4*GB);
   // We need sendbuff, recvbuff, expected (when datacheck enabled), plus 1G for the rest.
-  size_t memMaxBytes = (maxMem - reserveMem - 1*GB) / (datacheck ? 3 : 2);
+  int factor = datacheck ? 3 : 2;
+  if (use_relay_buffer) {
+    factor += relayBufferSizeFactor; // relay buffer needs send and recv buffer space
+  }
+  size_t memMaxBytes = (maxMem - reserveMem - 1*GB) / factor;
   if (maxBytes > memMaxBytes) {
     maxBytes = memMaxBytes;
     if (minBytes > maxBytes) minBytes = maxBytes;
@@ -1292,10 +1325,13 @@ testResult_t run() {
   cudaStream_t streams[nGpus*nThreads];
   void* sendbuffs[nGpus*nThreads];
   void* recvbuffs[nGpus*nThreads];
+  void* relaybuffs[nGpus*nThreads];
   void* expected[nGpus*nThreads];
   size_t sendBytes, recvBytes;
+  memset(relaybuffs, 0, sizeof(relaybuffs));
 
-  ncclTestEngine.getBuffSize(&sendBytes, &recvBytes, (size_t)maxBytes, (size_t)ncclProcs*nGpus*nThreads);
+  const int nranks = ncclProcs * nGpus * nThreads;
+  ncclTestEngine.getBuffSize(&sendBytes, &recvBytes, (size_t)maxBytes, (size_t)nranks);
 
   char* envstr = getenv("NCCL_TESTS_DEVICE");
   int gpu0 = envstr ? atoi(envstr) : -1;
@@ -1338,8 +1374,10 @@ testResult_t run() {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
   void* sendRegHandles[nThreads*nGpus];
   void* recvRegHandles[nThreads*nGpus];
+  void* relayRegHandles[nThreads*nGpus];
   memset(sendRegHandles, 0, sizeof(sendRegHandles));
   memset(recvRegHandles, 0, sizeof(recvRegHandles));
+  memset(relayRegHandles, 0, sizeof(relayRegHandles));
 #endif
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,28,0)
   ncclDevComm devComms[nThreads*nGpus];
@@ -1367,19 +1405,27 @@ testResult_t run() {
        }
      }
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+     const size_t relayBytes = (size_t)maxBytes * relayBufferSizeFactor;
      NCCLCHECK(ncclGroupStart());
      for (int i=0; i<nGpus*nThreads; i++) {
        CUDACHECK(cudaSetDevice(gpus[i]));
-       TESTCHECK(AllocateBuffs(sendbuffs+i, sendBytes, recvbuffs+i, recvBytes, expected+i, (size_t)maxBytes));
+       TESTCHECK(AllocateBuffs(sendbuffs+i, sendBytes, recvbuffs+i, recvBytes, expected+i,
+                               (size_t)maxBytes, relaybuffs+i));
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,27,0)
        if (test_ncclVersion >= NCCL_VERSION(2,27,0) && (local_register == SYMMETRIC_REGISTER)) {
          NCCLCHECK(ncclCommWindowRegister(comms[i], sendbuffs[i], maxBytes, (ncclWindow_t*)&sendRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
          NCCLCHECK(ncclCommWindowRegister(comms[i], recvbuffs[i], maxBytes, (ncclWindow_t*)&recvRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
+         if (use_relay_buffer && relaybuffs[i]) {
+           NCCLCHECK(ncclCommWindowRegister(comms[i], relaybuffs[i], relayBytes, (ncclWindow_t*)&relayRegHandles[i], NCCL_WIN_COLL_SYMMETRIC));
+         }
        } else
 #endif
        {
          if (local_register) NCCLCHECK(ncclCommRegister(comms[i], sendbuffs[i], maxBytes, &sendRegHandles[i]));
          if (local_register) NCCLCHECK(ncclCommRegister(comms[i], recvbuffs[i], maxBytes, &recvRegHandles[i]));
+         if (local_register && use_relay_buffer && relaybuffs[i]) {
+           NCCLCHECK(ncclCommRegister(comms[i], relaybuffs[i], relayBytes, &relayRegHandles[i]));
+         }
        }
      }
      NCCLCHECK(ncclGroupEnd());
@@ -1480,6 +1526,7 @@ testResult_t run() {
     threads[t].args.gpus=gpus+t*nGpus;
     threads[t].args.sendbuffs = sendbuffs+t*nGpus;
     threads[t].args.recvbuffs = recvbuffs+t*nGpus;
+    threads[t].args.relaybuffs = relaybuffs+t*nGpus;
     threads[t].args.expected = expected+t*nGpus;
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,28,0)
     threads[t].args.devComms = devComms+t*nGpus;
@@ -1487,6 +1534,7 @@ testResult_t run() {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
     threads[t].args.sendRegHandles = sendRegHandles+t*nGpus;
     threads[t].args.recvRegHandles = recvRegHandles+t*nGpus;
+    threads[t].args.relayRegHandles = relayRegHandles+t*nGpus;
 #endif
     threads[t].args.ncclId = ncclId;
     threads[t].args.comms=comms+t*nGpus;
@@ -1536,11 +1584,17 @@ testResult_t run() {
       if (test_ncclVersion >= NCCL_VERSION(2,27,0) && (local_register == SYMMETRIC_REGISTER)) {
         NCCLCHECK(ncclCommWindowDeregister(comms[i], (ncclWindow_t)sendRegHandles[i]));
         NCCLCHECK(ncclCommWindowDeregister(comms[i], (ncclWindow_t)recvRegHandles[i]));
+        if (use_relay_buffer && relayRegHandles[i]) {
+          NCCLCHECK(ncclCommWindowDeregister(comms[i], (ncclWindow_t)relayRegHandles[i]));
+        }
       } else
 #endif
       {
         if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
         if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
+        if (local_register && use_relay_buffer && relayRegHandles[i]) {
+          NCCLCHECK(ncclCommDeregister(comms[i], relayRegHandles[i]));
+        }
       }
 #endif
       NCCLCHECK(ncclCommDestroy(comms[i]));
@@ -1553,10 +1607,12 @@ testResult_t run() {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
     if (sendbuffs[i]) NCCLCHECK(ncclMemFree((char*)sendbuffs[i]));
     if (recvbuffs[i]) NCCLCHECK(ncclMemFree((char*)recvbuffs[i]));
+    if (relaybuffs[i]) NCCLCHECK(ncclMemFree((char*)relaybuffs[i]));
     if (datacheck) NCCLCHECK(ncclMemFree(expected[i]));
 #else
     if (sendbuffs[i]) CUDACHECK(cudaFree((char*)sendbuffs[i]));
     if (recvbuffs[i]) CUDACHECK(cudaFree((char*)recvbuffs[i]));
+    if (relaybuffs[i]) CUDACHECK(cudaFree((char*)relaybuffs[i]));
     if (datacheck) CUDACHECK(cudaFree(expected[i]));
 #endif
   }

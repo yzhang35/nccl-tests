@@ -142,6 +142,7 @@ struct threadArgs {
   size_t sendInplaceOffset;
   void** recvbuffs;
   size_t recvInplaceOffset;
+  void** relaybuffs;
   ncclUniqueId ncclId;
   ncclComm_t* comms;
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,28,0)
@@ -166,6 +167,7 @@ struct threadArgs {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
   void** sendRegHandles;
   void** recvRegHandles;
+  void** relayRegHandles;
 #endif
 };
 
@@ -300,6 +302,9 @@ extern const char *test_typenames[ncclNumTypes];
 extern ncclRedOp_t test_ops[];
 extern const char *test_opnames[];
 
+// relay buffer size factor for alltoallv test
+extern int relayBufferSizeFactor;
+
 static int ncclstringtotype(char *str) {
     for (int t=0; t<test_typenum; t++) {
       if (strcmp(str, test_typenames[t]) == 0) {
@@ -328,6 +333,7 @@ static int ncclstringtoop (char *str) {
 
 extern int is_main_proc;
 extern thread_local int is_main_thread;
+extern int use_relay_buffer;
 
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,28,0)
 template <typename F>
