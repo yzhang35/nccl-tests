@@ -106,7 +106,7 @@ int use_relay_buffer = 0;
 
 int deviceCtaCount = 16; // Default number of CTAs for device implementation
 
-int relayBufferSizeFactor = 4; // Default relay buffer size factor
+const int relayBufferSizeFactor = 4; // Default relay buffer size factor
 
 // Report average iteration time: (0=RANK0,1=AVG,2=MIN,3=MAX)
 static int average = 1;
@@ -815,9 +815,6 @@ testResult_t threadInit(struct threadArgs* args) {
     {
       if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->sendbuffs[i], args->maxbytes, &args->sendRegHandles[i]));
       if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->recvbuffs[i], args->maxbytes, &args->recvRegHandles[i]));
-      if (local_register && use_relay_buffer && args->relaybuffs && args->relaybuffs[i]) {
-        NCCLCHECK(ncclCommRegister(args->comms[i], args->relaybuffs[i], relayBytes, &args->relayRegHandles[i]));
-      }
     }
   }
   NCCLCHECK(ncclGroupEnd());
@@ -1198,6 +1195,10 @@ int main(int argc, char* argv[], char **envp) {
     fprintf(stderr, "device implementation (-D > 0) requires enabling symmetric memory registration (-R 2)\n");
     return -1;
   }
+  if (use_relay_buffer && (local_register != SYMMETRIC_REGISTER)) {
+    fprintf(stderr, "relay buffer (-B 1) requires enabling symmetric memory registration (-R 2)\n");
+    return -1;
+  }
 
 #ifdef MPI_SUPPORT
   MPI_Init(&argc, &argv);
@@ -1330,8 +1331,7 @@ testResult_t run() {
   size_t sendBytes, recvBytes;
   memset(relaybuffs, 0, sizeof(relaybuffs));
 
-  const int nranks = ncclProcs * nGpus * nThreads;
-  ncclTestEngine.getBuffSize(&sendBytes, &recvBytes, (size_t)maxBytes, (size_t)nranks);
+  ncclTestEngine.getBuffSize(&sendBytes, &recvBytes, (size_t)maxBytes, (size_t)ncclProcs*nGpus*nThreads);
 
   char* envstr = getenv("NCCL_TESTS_DEVICE");
   int gpu0 = envstr ? atoi(envstr) : -1;
@@ -1423,9 +1423,6 @@ testResult_t run() {
        {
          if (local_register) NCCLCHECK(ncclCommRegister(comms[i], sendbuffs[i], maxBytes, &sendRegHandles[i]));
          if (local_register) NCCLCHECK(ncclCommRegister(comms[i], recvbuffs[i], maxBytes, &recvRegHandles[i]));
-         if (local_register && use_relay_buffer && relaybuffs[i]) {
-           NCCLCHECK(ncclCommRegister(comms[i], relaybuffs[i], relayBytes, &relayRegHandles[i]));
-         }
        }
      }
      NCCLCHECK(ncclGroupEnd());
@@ -1592,9 +1589,6 @@ testResult_t run() {
       {
         if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
         if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
-        if (local_register && use_relay_buffer && relayRegHandles[i]) {
-          NCCLCHECK(ncclCommDeregister(comms[i], relayRegHandles[i]));
-        }
       }
 #endif
       NCCLCHECK(ncclCommDestroy(comms[i]));

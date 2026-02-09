@@ -303,7 +303,7 @@ extern ncclRedOp_t test_ops[];
 extern const char *test_opnames[];
 
 // relay buffer size factor for alltoallv test
-extern int relayBufferSizeFactor;
+extern const int relayBufferSizeFactor;
 
 static int ncclstringtotype(char *str) {
     for (int t=0; t<test_typenum; t++) {
