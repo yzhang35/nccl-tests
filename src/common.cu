@@ -100,6 +100,7 @@ static int timeout = 0;
 int cudaGraphLaunches = 0;
 static int report_cputime = 0;
 static int report_timestamps = 0;
+static int run_in_place = 1;
 static int deviceImpl = 0;
 int memory_report = 0;
 int use_relay_buffer = 0;
@@ -735,7 +736,7 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       setupArgs(size, type, args);
       writeBenchmarkLinePreamble(max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, root);
       TESTCHECK(BenchTime(args, type, op, root, 0));
-      TESTCHECK(BenchTime(args, type, op, root, 1));
+      if (run_in_place) TESTCHECK(BenchTime(args, type, op, root, 1));
       writeBenchmarkLineTerminator(iters, "");
     }
   } while (--repeat);
@@ -979,6 +980,7 @@ int main(int argc, char* argv[], char **envp) {
     {"cudagraph", required_argument, 0, 'G'},
     {"report_cputime", required_argument, 0, 'C'},
     {"report_timestamps", required_argument, 0, 'S'},
+    {"inplace", required_argument, 0, 'I'},
     {"output_file", required_argument, 0, 'J'},
     {"average", required_argument, 0, 'a'},
     {"local_register", required_argument, 0, 'R'},
@@ -994,7 +996,7 @@ int main(int argc, char* argv[], char **envp) {
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:J:S:M:B:", longopts, &longindex);
+    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:I:a:R:x:D:V:J:S:M:B:", longopts, &longindex);
 
     if (c == -1)
       break;
@@ -1089,6 +1091,9 @@ int main(int argc, char* argv[], char **envp) {
       case 'S':
         report_timestamps = strtol(optarg, NULL, 0);
         break;
+      case 'I':
+        run_in_place = strtol(optarg, NULL, 0);
+        break;
       case 'a':
         average = (int)strtol(optarg, NULL, 0);
         break;
@@ -1172,6 +1177,7 @@ int main(int argc, char* argv[], char **envp) {
             "[-G,--cudagraph <num graph launches>] \n\t"
             "[-C,--report_cputime <0/1>] \n\t"
             "[-S,--report_timestamps <0/1> report timestamps (default 0)] \n\t"
+            "[-I,--inplace <0/1> enable/disable in-place runs (default: 1)] \n\t"
             "[-J,--output_file <file> write output to filepath, if accessible. Infer type from suffix (only json supported presently.)] \n\t"
             "[-a,--average <0/1/2/3> report average iteration time <0=RANK0/1=AVG/2=MIN/3=MAX>] \n\t"
             "[-R,--local_register <0/1/2> enable local (1) or symmetric (2) buffer registration on send/recv buffers (default: disable (0))] \n\t"
@@ -1184,6 +1190,10 @@ int main(int argc, char* argv[], char **envp) {
           basename(argv[0]));
         return 0;
     }
+  }
+  if (run_in_place != 0 && run_in_place != 1) {
+    fprintf(stderr, "invalid value for 'inplace': %d (expected 0 or 1)\n", run_in_place);
+    return -1;
   }
   if (minBytes > maxBytes) {
     fprintf(stderr, "invalid sizes for 'minbytes' and 'maxbytes': %llu > %llu\n",

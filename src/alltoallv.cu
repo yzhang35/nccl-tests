@@ -26,6 +26,33 @@ static thread_local void** relaybuffsForThread = nullptr;
 static thread_local int relaybuffsFirstRank = -1;
 static thread_local int relaybuffsCount = 0;
 
+#if DEBUG_PRINT
+static void dumpAlltoAllvPlan(const AlltoAllvPlan* p) {
+  if (p == nullptr) return;
+  const int nranks = p->nranks;
+  const size_t n = (size_t)nranks;
+  fprintf(stderr, "AlltoAllv plan: count=%zu nranks=%d\n", p->count, nranks);
+  fprintf(stderr, "sendcounts:\n");
+  for (int r = 0; r < nranks; ++r) {
+    const size_t row = (size_t)r * n;
+    fprintf(stderr, "  rank %d:", r);
+    for (int c = 0; c < nranks; ++c) {
+      fprintf(stderr, " %zu", p->sendcounts[row + (size_t)c]);
+    }
+    fprintf(stderr, "\n");
+  }
+  fprintf(stderr, "sdispls:\n");
+  for (int r = 0; r < nranks; ++r) {
+    const size_t row = (size_t)r * n;
+    fprintf(stderr, "  rank %d:", r);
+    for (int c = 0; c < nranks; ++c) {
+      fprintf(stderr, " %zu", p->sdispls[row + (size_t)c]);
+    }
+    fprintf(stderr, "\n");
+  }
+}
+#endif
+
 // Generate balanced counts and displacements for alltoallv
 static void BuildBalancedCounts(size_t totalCount, int nranks, AlltoAllvPlan* out) {
   out->count = totalCount;
@@ -248,6 +275,17 @@ testResult_t AlltoAllvRunColl(void* sendbuff, size_t sendoffset, void* recvbuff,
     }
     return testNcclError;
   }
+  #if DEBUG_PRINT
+  static thread_local int dumpCount = 0;
+  if (dumpCount == 0) {
+    int rank;
+    NCCLCHECK(ncclCommUserRank(comm, &rank));
+    if (rank == 0 && is_main_thread) {
+      dumpAlltoAllvPlan(planPtr);
+    }
+  }
+  dumpCount++;
+  #endif
   return testSuccess;
 }
 
